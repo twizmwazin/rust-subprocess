@@ -255,6 +255,9 @@ pub enum Redirection {
     /// `Some(file)`, `File` being the parent's end of the pipe.
     Pipe,
 
+    /// Redirect the stream to a pseudo-terminal.
+    Pty,
+
     /// Merge the stream to the other output stream.
     ///
     /// This variant is only valid when configuring redirection of
@@ -300,6 +303,7 @@ impl Redirection {
         Ok(match *self {
             Redirection::None => Redirection::None,
             Redirection::Pipe => Redirection::Pipe,
+            Redirection::Pty => Redirection::Pty,
             Redirection::Merge => Redirection::Merge,
             Redirection::File(ref f) => Redirection::File(f.try_clone()?),
             Redirection::RcFile(ref f) => Redirection::RcFile(Rc::clone(&f)),
@@ -383,6 +387,20 @@ impl Popen {
             *child_ref = Some(Rc::new(child_end));
             Ok(())
         }
+        fn prepare_pty(
+            parent_ref: &mut Option<File>,
+            child_ref: &mut Option<Rc<File>>,
+        ) -> Result<()> {
+            // Avoid creating a new PTY if we already have one.
+            if let Some(_) = parent_ref {
+                return Ok(());
+            }
+            let (parent, child) = os::make_pty_pair()?;
+            os::set_inheritable(&parent, false)?;
+            *parent_ref = Some(parent);
+            *child_ref = Some(Rc::new(child));
+            Ok(())
+        }
         fn prepare_file(file: File, child_ref: &mut Option<Rc<File>>) -> io::Result<()> {
             // Make the File inheritable and store it for use in the child.
             os::set_inheritable(&file, true)?;
@@ -419,8 +437,14 @@ impl Popen {
 
         let (mut child_stdin, mut child_stdout, mut child_stderr) = (None, None, None);
 
+        let (mut pty_master, mut pty_slave) = (None, None);
+
         match stdin {
             Redirection::Pipe => prepare_pipe(true, &mut self.stdin, &mut child_stdin)?,
+            Redirection::Pty => {
+                prepare_pty(&mut pty_master, &mut pty_slave)?;
+                child_stdin = pty_slave.clone();
+            }
             Redirection::File(file) => prepare_file(file, &mut child_stdin)?,
             Redirection::RcFile(file) => prepare_rc_file(file, &mut child_stdin)?,
             Redirection::Merge => {
@@ -432,6 +456,10 @@ impl Popen {
         };
         match stdout {
             Redirection::Pipe => prepare_pipe(false, &mut self.stdout, &mut child_stdout)?,
+            Redirection::Pty => {
+                prepare_pty(&mut pty_master, &mut pty_slave)?;
+                child_stdout = pty_slave.clone();
+            }
             Redirection::File(file) => prepare_file(file, &mut child_stdout)?,
             Redirection::RcFile(file) => prepare_rc_file(file, &mut child_stdout)?,
             Redirection::Merge => merge = MergeKind::OutToErr,
@@ -439,6 +467,10 @@ impl Popen {
         };
         match stderr {
             Redirection::Pipe => prepare_pipe(false, &mut self.stderr, &mut child_stderr)?,
+            Redirection::Pty => {
+                prepare_pty(&mut pty_master, &mut pty_slave)?;
+                child_stderr = pty_slave.clone();
+            }
             Redirection::File(file) => prepare_file(file, &mut child_stderr)?,
             Redirection::RcFile(file) => prepare_rc_file(file, &mut child_stderr)?,
             Redirection::Merge => merge = MergeKind::ErrToOut,
@@ -936,6 +968,10 @@ mod os {
         posix::pipe()
     }
 
+    pub fn make_pty_pair() -> io::Result<(File, File)> {
+        posix::openpty()
+    }
+
     pub mod ext {
         use crate::popen::ChildState::*;
         use crate::popen::Popen;
@@ -1162,6 +1198,11 @@ mod os {
     /// `winapi::um::namedpipeapi::CreatePipe`, depending on the operating
     /// system.
     pub fn make_pipe() -> io::Result<(File, File)> {
+        win32::CreatePipe(true)
+    }
+
+    pub fn make_pty_pair() -> io::Result<(File, File)> {
+        // PTYs are not supported on Windows.
         win32::CreatePipe(true)
     }
 

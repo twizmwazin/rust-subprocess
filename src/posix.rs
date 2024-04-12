@@ -30,6 +30,21 @@ pub fn pipe() -> Result<(File, File)> {
     Ok(unsafe { (File::from_raw_fd(fds[0]), File::from_raw_fd(fds[1])) })
 }
 
+pub fn openpty() -> Result<(File, File)> {
+    let mut master = 0;
+    let mut slave = 0;
+    check_err(unsafe {
+        libc::openpty(
+            &mut master,
+            &mut slave,
+            ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+        )
+    })?;
+    Ok(unsafe { (File::from_raw_fd(master), File::from_raw_fd(slave)) })
+}
+
 // marked unsafe because the child must not allocate before exec-ing
 pub unsafe fn fork() -> Result<Option<u32>> {
     let pid = check_err(libc::fork())?;
